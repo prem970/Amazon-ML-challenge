@@ -1,0 +1,10 @@
+{
+  "validation_macro_f05": 0.99684,
+  "optimal_alpha": 0.7,
+  "optimal_threshold": 0.54,
+  "blocking_recall": 0.2492,
+  "avg_candidates_per_entity": 23.12,
+  "total_train_pairs": 228956,
+  "total_val_pairs": 57922,
+  "elapsed_seconds": 108.45
+}
