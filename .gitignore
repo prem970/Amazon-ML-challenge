@@ -1,0 +1,28 @@
+# Datasets & Large Data Files
+**/dataset/train/
+**/dataset/test/
+*.tsv
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+
+# System & OS Files
+.DS_Store
+__MACOSX/
+Thumbs.db
+desktop.ini
+
+# Python Caches & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.env
+
+# Model Checkpoints & Large Artifacts (>50MB)
+*.tar.gz
+*.zip
