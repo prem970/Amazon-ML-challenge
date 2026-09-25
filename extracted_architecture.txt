@@ -1,0 +1,370 @@
+Amazon ML Challenge 2026Business Entity ResolutionComplete End-to-End Architecture & High-Accuracy Implementation Plan
+Precision-first • Macro F₀.₅ • XGBoost + LightGBM Hybrid • Reproducible
+1. Objective and Design Philosophy
+This project is a business entity-resolution system. Source 1 is the deduplicated reference source; for every Source 1 record, the system must find zero, one, or multiple matching Source 2/Source 3 records. The official metric is macro F₀.₅, so the architecture is deliberately precision-first. The system must also correctly identify singletons, retain every test Source 1 entity, treat country as open-set, and use only the supplied challenge data.
+Core principle: candidate generation, feature engineering, pair classification, threshold selection, and final output construction are separate modules. Never let one stage silently perform another stage's job.
+2. Complete Architecture
+DATA │ ├── train_source1.tsv ─┐ ├── train_source2.tsv  ├──► DATA INGESTION + VALIDATION ├── train_source3.tsv ─┤ └── train_ground_truth ┘                         │                         ▼              MULTI-VIEW NORMALIZATION              ├── raw              ├── basic              ├── legal-normalized              ├── tokenized              └── character n-grams                         │                         ▼                ADDRESS COMPONENTS              ├── postal/ZIP              ├── house number              ├── city/locality              └── state/region                         │                         ▼               MULTI-PASS BLOCKING              ├── exact normalized name              ├── name prefix/token              ├── postal code              ├── locality + name token              ├── house number + address token              ├── character n-gram retrieval              ├── TF-IDF name top-K              └── TF-IDF address top-K                         │                         ▼                CANDIDATE UNION                + deduplication                + blocking recall audit                         │                         ▼               PAIRWISE FEATURES              ├── name similarities              ├── address similarities              ├── structured address              ├── country/source              ├── quality/missingness              └── cross-field interactions                         │                         ▼             TRAINING PAIR CONSTRUCTION              ├── true positives              ├── random negatives              └── hard negatives                         │                         ▼              ENTITY-AWARE VALIDATION                         │             ┌───────────┴───────────┐             ▼                       ▼         XGBoost                  LightGBM             │                       │             └───────────┬───────────┘                         ▼              HYBRID PROBABILITY        P = α·P_XGB + (1-α)·P_LGBM                         │                         ▼             JOINT (α, threshold) SEARCH                 maximize macro F₀.₅                         │                         ▼             PRECISION / ABSTENTION LAYER              ├── weak candidates rejected              ├── contradictory evidence guarded              └── singleton allowed                         │                         ▼                  TEST INFERENCE                         │              ┌──────────┴──────────┐              ▼                     ▼       candidate_pairs.tsv   matching_results.tsv              └──────────┬──────────┘                         ▼                SUBMISSION VALIDATOR
+3. Challenge Constraints → Engineering Decisions
+Constraint
+Implementation decision
+TSV inputs
+Always read with sep='\t'; keep IDs as strings.
+S1 is reference
+Every inference query starts from an S1 record.
+Zero/one/many matches
+Never force one-to-one matching.
+Macro F₀.₅
+Optimize threshold and ensemble weight for entity-level F₀.₅.
+Singletons
+Allow abstention/empty match list.
+France appears in test
+Country is open-set; never reject unseen labels.
+candidate_pairs.tsv
+Store the final candidate set actually scored by the model.
+≤8B + MIT/Apache 2.0
+Any optional neural model must satisfy these stated constraints.
+No external lookup
+No external databases, APIs, geocoding or web enrichment.
+4. Repository Architecture
+business_entity_resolution/├── data/{train,test}/├── src/│   ├── config.py│   ├── pipeline.py│   ├── data/{loader.py,validator.py,profiling.py}│   ├── preprocessing/│   │   ├── unicode_utils.py│   │   ├── name_normalizer.py│   │   ├── address_normalizer.py│   │   └── address_components.py│   ├── blocking/│   │   ├── exact_name.py│   │   ├── token_name.py│   │   ├── address_keys.py│   │   ├── tfidf_retrieval.py│   │   └── candidate_generator.py│   ├── features/│   │   ├── string_similarity.py│   │   ├── name_features.py│   │   ├── address_features.py│   │   ├── interaction_features.py│   │   └── build_features.py│   ├── training/│   │   ├── build_pairs.py│   │   ├── hard_negative_mining.py│   │   ├── split.py│   │   ├── train_xgb.py│   │   ├── train_lgbm.py│   │   └── hybrid_model.py│   ├── evaluation/│   │   ├── metrics.py│   │   ├── threshold_search.py│   │   ├── blocking_recall.py│   │   ├── calibration.py│   │   └── error_analysis.py│   └── inference/│       ├── predict.py│       ├── safety_layer.py│       └── output_writer.py├── models/├── output/├── experiments/├── requirements.txt├── README.md└── Documentation_template.md
+5. Stage 1 — Data Ingestion, Profiling and Validation
+Load all TSVs using sep='\t'.
+Validate required columns and data types.
+Check unique entity_id values and source prefixes.
+Measure missing name/address/country separately for S1, S2 and S3.
+Validate every ground-truth matched ID belongs to S2 or S3.
+Build dataset statistics before normalization: row counts, missingness, string lengths, duplicate normalized names, and address sparsity.
+Never delete a record solely because a field is missing.
+6. Stage 2 — Multi-View Text Normalization
+Keep multiple representations instead of destroying information with one aggressive normalizer.
+View
+Transformation
+Use
+raw
+Original value
+Audit/evidence
+basic
+Unicode + lowercase + punctuation/space cleanup
+General comparison
+legal
+Basic + common legal suffix normalization/removal
+Corporate-name matching
+token
+Tokenized normalized text
+Jaccard/token features
+compact
+Alphanumeric compact form
+Prefix/exact blocks
+char_ngram
+Character n-gram representation
+Typos/transliteration
+Name normalization
+Unicode normalize and lowercase.
+Normalize '&' ↔ 'and' where appropriate.
+Remove punctuation and collapse whitespace.
+Normalize common legal forms such as Pvt/Private, Ltd/Limited, Corp/Corporation, Inc.
+Create token and compact representations.
+Retain raw/basic forms because over-normalization can create collisions.
+Address normalization
+Unicode/lowercase/punctuation/whitespace normalization.
+Safe abbreviation normalization such as rd/road and st/street.
+Extract postal/ZIP code when present.
+Extract house/building number when present.
+Extract city/locality and state/region using patterns from supplied data only.
+Keep landmarks and distinctive tokens.
+Create token-set and character n-gram representations.
+7. Stage 3 — Multi-Pass Candidate Generation / Blocking
+Blocking is the recall ceiling: a true pair that never enters the candidate set cannot be recovered by any classifier. Use independent blocks and take their union.
+Block
+Candidate rule
+Role
+B1
+Exact normalized-name key
+Very high precision
+B2
+Compact-name prefix
+Suffix/punctuation variations
+B3
+Rare/high-information name token
+Word-order/partial names
+B4
+Exact postal code
+Strong locality evidence
+B5
+City/state + name token
+Locality + identity
+B6
+House number + address token
+Address structure
+B7
+Character n-gram retrieval
+Typos/transliteration
+B8
+TF-IDF top-K name
+Soft lexical retrieval
+B9
+TF-IDF top-K address
+Soft address retrieval
+Candidate set = union(B1...B9) → deduplicate → retain the exact set used by the final scorer.
+Blocking metrics
+Blocking recall = true ground-truth pairs recovered / all ground-truth pairs.
+Average candidates per S1.
+Median/p95/p99 candidate count.
+Reduction ratio.
+Recall by block and by source.
+Recall by missingness pattern and country.
+8. Stage 4 — Pairwise Feature Engineering
+Feature group
+Features
+Name
+Levenshtein ratio, Jaro-Winkler, token Jaccard, token overlap, token-set/sort similarity, TF-IDF cosine, character n-gram cosine, exact equality for each normalization view
+Address
+Levenshtein, Jaro-Winkler, token Jaccard, TF-IDF cosine, character n-gram cosine, exact normalized equality
+Structured address
+postal exact, city exact, state exact, house-number exact, component overlap count
+Quality
+name/address length, token counts, digit counts, missing indicators
+Country
+exact country match, missingness, open-set string features
+Source
+S1→S2/S3 indicator
+Interaction
+name×address, mean/min/max, differences, agreement count
+Recommended interaction features
+name_addr_product = name_similarity × address_similarity
+name_addr_mean = (name_similarity + address_similarity) / 2
+name_addr_min = min(name_similarity, address_similarity)
+name_addr_max = max(name_similarity, address_similarity)
+agreement_count = count of strong/exact agreements across name, postal, city, state, house number
+9. Stage 5 — Training Pair Construction
+Positive pairs come from the supplied ground truth. Negatives must include both easy and difficult cases.
+Random negatives.
+Same/similar name + different address.
+Same/similar address + different name.
+Same city/locality + similar name.
+Top TF-IDF candidate known to be a non-match.
+High-scoring false positives mined from a first model.
+Hard-negative mining loop: train baseline → score candidate negatives → select high-probability false positives → add them to training → retrain. This directly teaches the model to separate visually similar but distinct businesses.
+10. Stage 6 — Entity-Aware Validation
+Split by complete Source 1 entities, not individual pair rows.
+Start with 80% train / 20% validation.
+Save validation S1 IDs and the random seed.
+Do not leak candidate pairs from the same S1 into both sets.
+If sufficient data exists, use entity-aware cross-validation for model selection.
+Use validation for all threshold, ensemble-weight, and safety-rule decisions.
+11. Stage 7 — XGBoost
+Primary model: gradient-boosted trees over the engineered pair features.
+Parameter
+Search range
+Initial value
+n_estimators
+300–1000
+500
+learning_rate
+0.02–0.08
+0.03
+max_depth
+4–8
+6
+min_child_weight
+1–10
+3
+subsample
+0.70–1.00
+0.80
+colsample_bytree
+0.70–1.00
+0.80
+gamma
+0–0.5
+0.10
+reg_alpha
+0–1
+0.10
+reg_lambda
+1–5
+2.0
+Use early stopping. Select parameters using validation macro F₀.₅, not ordinary accuracy.
+12. Stage 8 — LightGBM
+Secondary model with a different tree-growing/regularization behavior.
+Parameter
+Search range
+Initial value
+n_estimators
+300–1000
+500
+learning_rate
+0.02–0.08
+0.03
+num_leaves
+15–63
+31
+max_depth
+-1 or 4–10
+-1
+min_child_samples
+10–100
+20
+subsample
+0.70–1.00
+0.80
+colsample_bytree
+0.70–1.00
+0.80
+reg_alpha
+0–1
+0.10
+reg_lambda
+0.5–5
+1.0
+13. Stage 9 — Requested Hybrid Hyperparameter Strategy
+Use two complementary hyperparameters jointly: α, the XGBoost/LightGBM blending weight, and τ, the final match threshold. This is the core hybrid optimization. Instead of assuming that either model or threshold is best, search the pair (α, τ) directly against validation macro F₀.₅.
+Hybrid probability:
+P_hybrid = α × P_XGB + (1 − α) × P_LGBM
+Hyperparameter
+Search
+Purpose
+α
+0.00, 0.01, …, 1.00
+Controls model contribution
+τ
+0.50, 0.51, …, 0.99; refine by 0.001
+Controls precision/recall operating point
+Joint search procedure
+Train the selected XGBoost configuration.
+Train the selected LightGBM configuration.
+Store validation probabilities from both models.
+For each α, calculate P_hybrid.
+For each α and τ, construct match predictions.
+Compute macro F₀.₅ at Source 1 entity level, including singletons.
+Select the highest validation F₀.₅ pair (α*, τ*).
+Refine α and τ around the best coarse result.
+Freeze α* and τ* for test inference.
+Important: α and τ are hyperparameters, not guaranteed values. The validation data decides the final pair.
+14. Why the Hybrid Can Improve Accuracy
+XGBoost and LightGBM can make different errors even with the same features. A weighted probability blend can reduce model-specific variance. The threshold then converts the blended probability into a precision-focused decision. The combination is useful only if validation F₀.₅ improves; otherwise use the stronger single model.
+15. Stage 10 — Calibration (Optional)
+Test probability calibration only if raw probabilities are unstable. Candidate methods include Platt/logistic calibration or isotonic regression. Calibration must use a separate calibration portion where possible. Keep it only if the final macro F₀.₅ or stability improves.
+16. Stage 11 — Precision Safety Layer
+If P_hybrid < τ → reject.
+If name evidence is weak, require stronger independent address evidence.
+If address evidence strongly contradicts the candidate, penalize/reject only if validation supports the rule.
+Never force a match merely because it is the top candidate.
+Allow multiple matches when multiple candidates independently satisfy the final decision rule.
+Do not impose a one-to-one constraint: the challenge explicitly allows zero, one, or many matches.
+17. Stage 12 — Singleton / Abstention Logic
+For each S1, sort candidates by P_hybrid and let p1/p2 be the top two.
+If p1 < τ → empty matched_entity_ids.
+Optionally use p1−p2 as a confidence-margin feature/guard; validate before using.
+Do not force the best candidate for weak evidence.
+Measure singleton false positives separately.
+18. Stage 13 — Optional Small Model Verifier
+Only after the tree pipeline is strong, test a small open-source model as a verifier for borderline pairs. It must comply with the challenge's stated license and ≤8B parameter requirement. It must use only the supplied record information, never external business data. Route only uncertain pairs to it. Keep it only if validation macro F₀.₅ improves.
+19. Stage 14 — Error Analysis
+Separate blocking failures from classifier failures.
+List false positives with highest model probability.
+List false negatives with highest evidence but rejected decisions.
+Group errors by name-only, address-only, both, missing fields, source and country.
+Convert recurring false-positive patterns into hard negatives or new features.
+Re-run the fixed validation split after each controlled change.
+20. Experiment Roadmap
+E01 exact normalized-name baseline.
+E02 fuzzy name features.
+E03 address features.
+E04 multi-pass blocking.
+E05 XGBoost baseline.
+E06 LightGBM baseline.
+E07 hard-negative mining.
+E08 XGBoost hyperparameter search.
+E09 LightGBM hyperparameter search.
+E10 hybrid α search.
+E11 joint α + threshold search.
+E12 singleton/precision safety.
+E13 optional probability calibration.
+E14 optional small-model verifier.
+Experiment
+Blocking recall
+Precision
+Recall
+F₀.₅
+Avg candidates
+α
+τ
+21. Final Inference
+Load test S1/S2/S3.
+Apply the exact fitted preprocessing and feature schema.
+Build test blocking indexes from S2/S3.
+Generate and union candidates for every S1.
+Freeze candidate_pairs.tsv as the exact set scored by the final model.
+Generate pair features.
+Run XGBoost and LightGBM.
+Compute P_hybrid using α*.
+Apply threshold τ* and validated safety rules.
+Allow empty lists.
+Write exactly one output row for every test S1.
+Validate output before submission.
+22. Output Rules
+File
+Required behavior
+matching_results.tsv
+Exactly one row per test S1; matched_entity_ids contains only valid S2/S3 IDs; empty when no match.
+candidate_pairs.tsv
+Exactly one row per test S1; candidate_entity_ids are the final candidates actually scored; empty if no candidates.
+No duplicate entity IDs inside an ID list.
+No S1 IDs in matched lists.
+Every final match must appear in the corresponding candidate list.
+Use tab separators.
+Run the provided validator.
+23. Reproducibility and Production Controls
+Pin dependency versions.
+Fix random seeds.
+Save train/validation S1 IDs.
+Save normalization configuration.
+Save feature order/schema.
+Save XGBoost and LightGBM models.
+Save α* and τ*.
+Save experiment metrics.
+Provide one end-to-end command to regenerate outputs.
+Log candidate counts and model versions.
+24. Recommended High-Accuracy Configuration
+Component
+Recommended starting design
+Blocking
+9-pass union; prioritize recall first
+Features
+30–100+ complementary name/address/structured/interaction features
+Training
+Positive + random negative + hard-negative pairs
+Primary model
+XGBoost
+Secondary model
+LightGBM
+Hybrid
+P = α·PXGB + (1−α)·PLGBM
+Hybrid hyperparameters
+α + τ jointly optimized for macro F₀.₅
+Threshold
+Validation search 0.50–0.99, then fine search
+Singletons
+Explicit abstention
+Optional verifier
+Only borderline pairs; only if validation improves
+External data
+Strictly none
+25. Non-Negotiable Mistakes to Avoid
+Do not compare every S1 against every S2/S3 if blocking can reduce the search space.
+Do not rely on exact names only.
+Do not use only random negatives.
+Do not optimize ordinary accuracy instead of macro F₀.₅.
+Do not use a fixed 0.5 threshold without validation.
+Do not force one match per S1.
+Do not hard-code countries to US/India.
+Do not let candidate generation silently remove true matches.
+Do not keep an ensemble unless validation proves improvement.
+Do not use external lookup or enrichment.
+Do not tune α/τ from the public leaderboard instead of held-out validation.
+26. Final End-to-End Algorithm
+1. Load and validate TSV data.2. Profile missingness and noise.3. Create raw/basic/legal/token/compact/character views.4. Extract address components.5. Build multiple blocking indexes.6. Generate candidates with all blocking passes.7. Union and deduplicate candidates.8. Measure blocking recall.9. Build pairwise similarity and structured features.10. Construct positives and random/hard negatives.11. Split by complete S1 entities.12. Train/tune XGBoost.13. Train/tune LightGBM.14. Produce validation probabilities from both.15. Search α for the hybrid blend.16. Search τ jointly with α using macro F₀.₅.17. Add only validated precision/singleton safeguards.18. Optionally test calibration and a small verifier.19. Freeze preprocessing, models, α*, τ*, feature schema.20. Run identical pipeline on test.21. Write final candidate_pairs.tsv and matching_results.tsv.22. Run the official validator.23. Package code, requirements, outputs and methodology.
+27. Source Alignment
+The uploaded problem statement establishes the task, noisy name/address patterns, open-set country behavior, required output files, macro F₀.₅ scoring, singleton behavior, ≤8B and MIT/Apache 2.0 model constraint, blocking guidance, and prohibition on external lookup. The specific XGBoost/LightGBM architecture, hard-negative mining, entity-aware split, hybrid α+τ optimization, and optional calibration/verifier are engineering recommendations for pursuing a higher validation score; they are not claimed to be requirements stated by the challenge.
